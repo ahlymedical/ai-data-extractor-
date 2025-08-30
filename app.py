@@ -8,20 +8,19 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 
 # --- إعدادات التطبيق والذكاء الاصطناعي ---
-load_dotenv() # لتحميل المتغيرات من ملف .env (اختياري للاستخدام المحلي)
+load_dotenv()
 
-UPLOAD_FOLDER = 'uploads'
-CONVERTED_FOLDER = 'converted'
+# استخدام مجلد مؤقت آمن يوفره نظام التشغيل بدلاً من مجلدات محلية
+from tempfile import gettempdir
+UPLOAD_FOLDER = gettempdir()
+CONVERTED_FOLDER = gettempdir()
+
 ALLOWED_EXTENSIONS = {'xlsx', 'pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'}
 
 app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['CONVERTED_FOLDER'] = CONVERTED_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB file size limit
-
-# التأكد من وجود المجلدات
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(CONVERTED_FOLDER, exist_ok=True)
+app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
 
 # إعداد مفتاح API الخاص بـ Gemini
 try:
@@ -31,18 +30,8 @@ try:
     genai.configure(api_key=api_key)
 except Exception as e:
     print(f"خطأ فادح عند إعداد واجهة برمجة التطبيقات: {e}")
-    # يمكن إيقاف التطبيق هنا إذا لم يكن المفتاح موجودًا
-    # sys.exit(1)
-
-
-# --- الدوال المساعدة ---
-
-def allowed_file(filename):
-    """تتحقق من امتداد الملف."""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # --- التعليمات الدقيقة للذكاء الاصطناعي (Prompt) ---
-# هذا هو الجزء الأهم في التطبيق بأكمله
 EXTRACTION_PROMPT = """
 أنت مساعد خبير في استخلاص البيانات بشكل منظم ومهمتك هي تحليل المستندات المقدمة لك. 
 هذه المستندات تحتوي على قوائم لمقدمي خدمة طبية. 
@@ -75,48 +64,34 @@ def index():
 
 @app.route('/extract', methods=['POST'])
 def extract_data():
-    """
-    يستقبل الملف، يرسله للذكاء الاصطناعي للاستخلاص، ويحفظ النتائج.
-    """
     if 'file' not in request.files:
         return jsonify(error="لم يتم إرسال أي ملف"), 400
     
     file = request.files['file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify(error="نوع الملف غير مدعوم أو لم يتم اختيار ملف"), 400
+    if file.filename == '':
+        return jsonify(error="لم يتم اختيار ملف"), 400
 
-    filename = secure_filename(file.filename)
-    
     try:
-        # قراءة بيانات الملف
         file_bytes = file.read()
-        
-        # تحديد نوع MIME
-        mime_type = mimetypes.guess_type(filename)
+        mime_type, _ = mimetypes.guess_type(file.filename)
         if not mime_type:
-            # افتراضي إذا لم يتمكن من التخمين
             mime_type = 'application/octet-stream'
 
-        # إعداد النموذج
         model = genai.GenerativeModel('gemini-1.5-pro-latest')
         
-        # إرسال الطلب إلى Gemini
-        print(f"[*] يتم إرسال الملف {filename} ({mime_type}) إلى الذكاء الاصطناعي للتحليل...")
+        print(f"[*] يتم إرسال الملف {file.filename} ({mime_type}) إلى الذكاء الاصطناعي للتحليل...")
         response = model.generate_content([EXTRACTION_PROMPT, {"mime_type": mime_type, "data": file_bytes}])
         
-        # تنظيف استجابة الذكاء الاصطناعي
         cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
 
-        # التحقق من أن النص هو JSON صالح
         try:
-            # هذا يضمن أن الذكاء الاصطناعي قد أعاد بيانات صالحة
             json_data = json.loads(cleaned_text)
         except json.JSONDecodeError:
             print(f"[!] خطأ: فشل الذكاء الاصطناعي في توليد JSON صالح. الرد كان:\n{response.text}")
             raise ValueError("لم يتمكن المساعد الذكي من استخلاص البيانات بصيغة صحيحة.")
 
-        # حفظ الملف الناتج
         output_filename = f"{uuid.uuid4()}.json"
+        # استخدام مسار آمن في المجلد المؤقت
         output_path = os.path.join(app.config['CONVERTED_FOLDER'], output_filename)
         
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -131,8 +106,8 @@ def extract_data():
 
     except Exception as e:
         print(f"[!] حدث خطأ أثناء المعالجة: {e}")
+        # إرجاع رسالة الخطأ الفعلية للمستخدم لتسهيل تصحيح الأخطاء
         return jsonify(error=str(e)), 500
-
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -140,15 +115,16 @@ def download_file(filename):
     يسمح للمستخدم بتحميل ملف JSON الناتج.
     """
     try:
+        # تأمين اسم الملف قبل استخدامه
+        safe_filename = secure_filename(filename)
         return send_from_directory(
             app.config['CONVERTED_FOLDER'],
-            filename,
+            safe_filename,
             as_attachment=True,
-            download_name="network_data.json" # اسم الملف الذي سيظهر للمستخدم عند التحميل
+            download_name="network_data.json"
         )
     except FileNotFoundError:
         abort(404)
 
-# --- تشغيل التطبيق ---
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
