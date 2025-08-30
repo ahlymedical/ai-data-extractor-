@@ -6,31 +6,15 @@ from flask import Flask, request, jsonify, send_from_directory, abort
 from werkzeug.utils import secure_filename
 import google.generativeai as genai
 from dotenv import load_dotenv
+import pandas as pd # <-- تم استيراد المكتبة الجديدة لمعالجة Excel
 
-# --- إعدادات التطبيق والذكاء الاصطناعي ---
+# --- إعدادات التطبيق ---
 load_dotenv()
-
-# استخدام مجلد مؤقت آمن يوفره نظام التشغيل
 from tempfile import gettempdir
 TEMP_FOLDER = gettempdir()
 
-ALLOWED_EXTENSIONS = {'xlsx', 'pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'}
-
-# ======================================================================
-#  **هذا هو الإصلاح الجذري للمشكلة**
-#  نقوم بتحديد المسار الكامل والدقيق لمجلد الواجهة الأمامية (static)
-#  لضمان أن Flask يجده دائمًا، بغض النظر عن بيئة التشغيل.
-# ======================================================================
-# الحصول على المسار الحالي للملف (app.py)
-basedir = os.path.abspath(os.path.dirname(__file__))
-# إنشاء المسار الكامل لمجلد static
-static_folder_path = os.path.join(basedir, 'static')
-
-# إعطاء المسار الكامل لـ Flask عند إنشاء التطبيق
-app = Flask(__name__, static_folder=static_folder_path)
-# ======================================================================
-
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
+app = Flask(__name__, static_folder='static')
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 # إعداد مفتاح API الخاص بـ Gemini
 try:
@@ -43,33 +27,31 @@ except Exception as e:
 
 # --- التعليمات الدقيقة للذكاء الاصطناعي (Prompt) ---
 EXTRACTION_PROMPT = """
-أنت مساعد خبير في استخلاص البيانات بشكل منظم ومهمتك هي تحليل المستندات المقدمة لك. 
-هذه المستندات تحتوي على قوائم لمقدمي خدمة طبية. 
-المطلوب منك هو المرور على المستند بالكامل واستخلاص المعلومات التالية لكل مقدم خدمة تجده:
+أنت مساعد خبير في استخلاص البيانات بشكل منظم ومهمتك هي تحليل المستندات أو النصوص المقدمة لك. 
+هذه البيانات تحتوي على قوائم لمقدمي خدمة طبية. 
+المطلوب منك هو المرور على المحتوى بالكامل واستخلاص المعلومات التالية لكل مقدم خدمة تجده:
 
-1.  **id**: يجب أن يكون معرفًا فريدًا. يمكنك استخدام رقم تسلسلي مثل "CID000001", "CID000002", وهكذا.
-2.  **governorate**: المحافظة التي يقع بها مقدم الخدمة.
+1.  **id**: يجب أن يكون معرفًا فريدًا. استخدم رقم تسلسلي مثل "CID000001", "CID000002", وهكذا.
+2.  **governorate**: المحافظة.
 3.  **area**: المنطقة أو الحي.
-4.  **type**: نوع مقدم الخدمة (مثال: مستشفى، صيدلية، معمل، مركز طبي، إلخ).
-5.  **specialty_main**: التخصص الرئيسي (مثال: باطنة، عظام، صيدلية).
+4.  **type**: نوع مقدم الخدمة (مثال: مستشفى، صيدلية، معمل).
+5.  **specialty_main**: التخصص الرئيسي.
 6.  **specialty_sub**: التخصص الفرعي (إذا وجد، وإلا كرر التخصص الرئيسي).
 7.  **name**: اسم مقدم الخدمة.
 8.  **address**: العنوان بالتفصيل.
 9.  **hotline**: الخط الساخن (إذا وجد، يجب أن يكون كنص). إذا لم يوجد، استخدم `null`.
-10. **phones**: قائمة بكل أرقام الهواتف الأخرى. يجب أن تكون قائمة من النصوص (array of strings). إذا لم توجد هواتف، استخدم قائمة فارغة `[]`.
+10. **phones**: قائمة بكل أرقام الهواتف الأخرى كقائمة من النصوص (array of strings). إذا لم توجد، استخدم `[]`.
 
 **قواعد الإخراج النهائية (مهم جدًا):**
 - يجب أن يكون إخراجك النهائي عبارة عن مصفوفة JSON واحدة `[...]` تحتوي على كائنات JSON لكل مقدم خدمة.
 - لا تقم بتضمين أي نص أو شروحات أو ملاحظات قبل أو بعد مصفوفة JSON.
 - لا تستخدم علامات markdown مثل ```json.
-- كن دقيقًا جدًا في استخلاص البيانات وتأكد من تطابق أسماء الحقول تمامًا مع ما هو مطلوب أعلاه.
 """
 
 # --- نقاط النهاية (API Endpoints) ---
 
 @app.route('/')
 def index():
-    """يقدم صفحة الويب الرئيسية."""
     return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/extract', methods=['POST'])
@@ -82,24 +64,42 @@ def extract_data():
         return jsonify(error="لم يتم اختيار ملف"), 400
 
     try:
-        file_bytes = file.read()
-        mime_type = file.mimetype
-        
-        supported_mime_types = [
-            'application/pdf', 'image/png', 'image/jpeg', 'image/heic', 'image/heif', 'image/webp',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', # .xlsx
-            'application/vnd.ms-excel', # .xls
-            'application/msword', # .doc
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' # .docx
-        ]
-        
-        if mime_type not in supported_mime_types:
-             return jsonify(error=f"نوع الملف '{mime_type}' غير مدعوم حاليًا من قبل الذكاء الاصطناعي."), 400
-
         model = genai.GenerativeModel('gemini-1.5-pro-latest')
+        content_to_process = None
         
-        print(f"[*] يتم إرسال الملف {file.filename} (النوع: {mime_type}) إلى الذكاء الاصطناعي للتحليل...")
-        response = model.generate_content([EXTRACTION_PROMPT, {"mime_type": mime_type, "data": file_bytes}])
+        # ======================================================================
+        #  **الحل الهجين المبتكر والفعال**
+        #  التحقق من نوع الملف وتحديد أفضل طريقة للمعالجة
+        # ======================================================================
+        mime_type = file.mimetype
+        print(f"[*] تم استلام ملف: {file.filename}, النوع: {mime_type}")
+
+        # أنواع ملفات Excel التي ستتم معالجتها بواسطة Pandas
+        excel_mimetypes = [
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', # .xlsx
+            'application/vnd.ms-excel' # .xls
+        ]
+
+        if mime_type in excel_mimetypes:
+            print("[*] تم اكتشاف ملف Excel. تتم المعالجة باستخدام Pandas...")
+            # 1. قراءة بيانات Excel باستخدام Pandas
+            df = pd.read_excel(file)
+            # 2. تحويل البيانات إلى نص بسيط (صيغة Markdown مناسبة للذكاء الاصطناعي)
+            data_as_text = df.to_markdown(index=False)
+            # 3. تجهيز المحتوى لإرساله كنص
+            content_to_process = [EXTRACTION_PROMPT, "الرجاء تحويل جدول البيانات التالي بصيغة Markdown إلى JSON:", data_as_text]
+        
+        else: # للملفات الأخرى (PDF, صور, Word)
+            print("[*] تم اكتشاف ملف غير منظم (PDF/صورة/...). تتم المعالجة مباشرة عبر Gemini...")
+            # 1. قراءة الملف كبيانات ثنائية (bytes)
+            file_bytes = file.read()
+            # 2. تجهيز المحتوى لإرساله كملف
+            content_to_process = [EXTRACTION_PROMPT, {"mime_type": mime_type, "data": file_bytes}]
+
+        # ======================================================================
+
+        print("[*] يتم إرسال الطلب إلى الذكاء الاصطناعي...")
+        response = model.generate_content(content_to_process)
         
         cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
 
@@ -128,9 +128,6 @@ def extract_data():
 
 @app.route('/download/<filename>')
 def download_file(filename):
-    """
-    يسمح للمستخدم بتحميل ملف JSON الناتج.
-    """
     try:
         safe_filename = secure_filename(filename)
         return send_from_directory(
