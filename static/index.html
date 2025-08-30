@@ -125,10 +125,16 @@
 
         fileInput.addEventListener('change', () => {
             if (fileInput.files.length > 0) {
-                selectedFile = fileInput.files;
+                // ==========================================================
+                //  **هذا هو السطر الذي تم إصلاحه**
+                //  نختار الملف الأول من قائمة الملفات [0]
+                // ==========================================================
+                selectedFile = fileInput.files[0]; 
+
                 fileInfoDiv.textContent = `الملف المختار: ${selectedFile.name}`;
                 processFileBtn.disabled = false;
-                downloadLink.style.display = 'none'; // Hide download link if a new file is selected
+                downloadLink.style.display = 'none';
+                statusDiv.style.display = 'none';
             }
         });
 
@@ -138,7 +144,6 @@
                 return;
             }
 
-            // Disable buttons during processing
             processFileBtn.disabled = true;
             selectFileBtn.disabled = true;
 
@@ -165,7 +170,6 @@
                 statusDiv.className = 'status error';
                 statusDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> فشل الاستخلاص: ${error.message}`;
             } finally {
-                // Re-enable select button
                 selectFileBtn.disabled = false;
             }
         });
