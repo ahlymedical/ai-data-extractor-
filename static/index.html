@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>أداة استخلاص البيانات بالذكاء الاصطناعي</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --primary-color: #4285F4; --secondary-color: #34A853; }
+        body {
+            font-family: 'Cairo', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            color: #333;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 40px 50px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 700px;
+            text-align: center;
+            border-top: 5px solid var(--primary-color);
+        }
+        h1 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+        p {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .upload-area {
+            border: 3px dashed #d1d1d1;
+            border-radius: 8px;
+            padding: 40px 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background-color: #fafafa;
+        }
+        .upload-area:hover, .upload-area.drag-over {
+            border-color: var(--primary-color);
+            background-color: #f0f5ff;
+        }
+        .upload-area i {
+            font-size: 4rem;
+            color: var(--primary-color);
+            margin-bottom: 15px;
+            display: block;
+        }
+        #file-input { display: none; }
+        #upload-text { font-size: 1.2em; font-weight: 600; }
+        #file-info { font-size: 0.9em; color: #555; margin-top: 10px; min-height: 20px; }
+        .status {
+            margin-top: 25px;
+            font-size: 1.1em;
+            font-weight: 600;
+            min-height: 25px;
+            padding: 10px;
+            border-radius: 6px;
+            display: none;
+        }
+        .status.processing { background-color: #e9f5ff; color: #0056b3; }
+        .status.error { background-color: #f8d7da; color: #721c24; }
+        .status.success { background-color: #d4edda; color: #155724; }
+        .download-button {
+            display: none;
+            margin-top: 20px;
+            background-color: var(--secondary-color);
+            color: white;
+            padding: 14px 35px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1.1em;
+            font-weight: 700;
+            text-decoration: none;
+            transition: background-color 0.3s ease;
+        }
+        .download-button:hover { background-color: #2a8c4a; }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--primary-color);
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <h1><i class="fas fa-robot"></i> أداة استخلاص البيانات الذكية</h1>
+        <p>ارفع أي ملف (Excel, PDF, Word, صورة) يحتوي على بيانات الشبكة الطبية، وسيقوم الذكاء الاصطناعي بتحليله وتحويله إلى ملف JSON جاهز للاستخدام.</p>
+        <form id="upload-form">
+            <label for="file-input">
+                <div class="upload-area" id="upload-area">
+                    <i class="fas fa-file-import"></i>
+                    <div id="upload-text">اضغط أو اسحب الملف إلى هنا</div>
+                    <div id="file-info"></div>
+                </div>
+            </label>
+            <input type="file" id="file-input" accept=".xlsx, .pdf, .doc, .docx, .png, .jpg, .jpeg">
+        </form>
+        <div class="status" id="status"></div>
+        <a href="#" class="download-button" id="download-link" download="network_data.json">
+            <i class="fas fa-download"></i> تحميل الملف الناتج
+        </a>
+    </div>
+    <script>
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const statusDiv = document.getElementById('status');
+        const downloadLink = document.getElementById('download-link');
+        const fileInfoDiv = document.getElementById('file-info');
+
+        uploadArea.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', () => fileInput.files.length > 0 && handleFileUpload(fileInput.files[0]));
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => uploadArea.addEventListener(eventName, preventDefaults, false));
+        function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+        ['dragenter', 'dragover'].forEach(eventName => uploadArea.addEventListener(eventName, () => uploadArea.classList.add('drag-over'), false));
+        ['dragleave', 'drop'].forEach(eventName => uploadArea.addEventListener(eventName, () => uploadArea.classList.remove('drag-over'), false));
+        uploadArea.addEventListener('drop', (e) => handleFileUpload(e.dataTransfer.files[0]));
+
+        async function handleFileUpload(file) {
+            fileInfoDiv.textContent = `الملف المختار: ${file.name}`;
+            statusDiv.className = 'status processing';
+            statusDiv.innerHTML = 'جاري تحليل الملف بالذكاء الاصطناعي... قد تستغرق العملية دقيقة أو أكثر للملفات الكبيرة والمعقدة. <div class="spinner"></div>';
+            statusDiv.style.display = 'block';
+            downloadLink.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/extract', { method: 'POST', body: formData });
+                const result = await response.json();
+
+                if (!response.ok) throw new Error(result.error || 'حدث خطأ غير متوقع');
+                
+                statusDiv.className = 'status success';
+                statusDiv.innerHTML = `<i class="fas fa-check-circle"></i> اكتمل الاستخلاص بنجاح! الملف جاهز للتحميل.`;
+                downloadLink.href = result.download_url;
+                downloadLink.style.display = 'inline-block';
+            } catch (error) {
+                statusDiv.className = 'status error';
+                statusDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> فشل الاستخلاص: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>
