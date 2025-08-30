@@ -1,0 +1,6 @@
+Flask
+gunicorn
+pandas
+openpyxl
+google-generativeai
+python-dotenv
