@@ -1,141 +1,178 @@
-import os
-import json
-import uuid
-import mimetypes
-from flask import Flask, request, jsonify, send_from_directory, abort
-from werkzeug.utils import secure_filename
-import google.generativeai as genai
-from dotenv import load_dotenv
-
-# --- إعدادات التطبيق والذكاء الاصطناعي ---
-load_dotenv()
-
-# استخدام مجلد مؤقت آمن يوفره نظام التشغيل
-from tempfile import gettempdir
-TEMP_FOLDER = gettempdir()
-
-ALLOWED_EXTENSIONS = {'xlsx', 'pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'}
-
-app = Flask(__name__, static_folder='static')
-# زيادة الحد الأقصى لحجم الملف المسموح به
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
-
-# إعداد مفتاح API الخاص بـ Gemini
-try:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("لم يتم العثور على مفتاح GEMINI_API_KEY في متغيرات البيئة.")
-    genai.configure(api_key=api_key)
-except Exception as e:
-    print(f"خطأ فادح عند إعداد واجهة برمجة التطبيقات: {e}")
-
-# --- التعليمات الدقيقة للذكاء الاصطناعي (Prompt) ---
-EXTRACTION_PROMPT = """
-أنت مساعد خبير في استخلاص البيانات بشكل منظم ومهمتك هي تحليل المستندات المقدمة لك. 
-هذه المستندات تحتوي على قوائم لمقدمي خدمة طبية. 
-المطلوب منك هو المرور على المستند بالكامل واستخلاص المعلومات التالية لكل مقدم خدمة تجده:
-
-1.  **id**: يجب أن يكون معرفًا فريدًا. يمكنك استخدام رقم تسلسلي مثل "CID000001", "CID000002", وهكذا.
-2.  **governorate**: المحافظة التي يقع بها مقدم الخدمة.
-3.  **area**: المنطقة أو الحي.
-4.  **type**: نوع مقدم الخدمة (مثال: مستشفى، صيدلية، معمل، مركز طبي، إلخ).
-5.  **specialty_main**: التخصص الرئيسي (مثال: باطنة، عظام، صيدلية).
-6.  **specialty_sub**: التخصص الفرعي (إذا وجد، وإلا كرر التخصص الرئيسي).
-7.  **name**: اسم مقدم الخدمة.
-8.  **address**: العنوان بالتفصيل.
-9.  **hotline**: الخط الساخن (إذا وجد، يجب أن يكون كنص). إذا لم يوجد، استخدم `null`.
-10. **phones**: قائمة بكل أرقام الهواتف الأخرى. يجب أن تكون قائمة من النصوص (array of strings). إذا لم توجد هواتف، استخدم قائمة فارغة `[]`.
-
-**قواعد الإخراج النهائية (مهم جدًا):**
-- يجب أن يكون إخراجك النهائي عبارة عن مصفوفة JSON واحدة `[...]` تحتوي على كائنات JSON لكل مقدم خدمة.
-- لا تقم بتضمين أي نص أو شروحات أو ملاحظات قبل أو بعد مصفوفة JSON.
-- لا تستخدم علامات markdown مثل ```json.
-- كن دقيقًا جدًا في استخلاص البيانات وتأكد من تطابق أسماء الحقول تمامًا مع ما هو مطلوب أعلاه.
-"""
-
-# --- نقاط النهاية (API Endpoints) ---
-
-@app.route('/')
-def index():
-    """يقدم صفحة الويب الرئيسية."""
-    return send_from_directory('static', 'index.html')
-
-@app.route('/extract', methods=['POST'])
-def extract_data():
-    if 'file' not in request.files:
-        return jsonify(error="لم يتم إرسال أي ملف"), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify(error="لم يتم اختيار ملف"), 400
-
-    try:
-        # ======================================================================
-        #  **هذا هو الإصلاح الجذري للمشكلة**
-        #  نستخدم الآن نوع الملف (MIME type) الذي يرسله المتصفح مباشرة
-        #  بدلاً من محاولة تخمينه، وهذا يضمن الدقة التامة.
-        # ======================================================================
-        file_bytes = file.read()
-        mime_type = file.mimetype # <- السطر الجديد والمُعدل
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>أداة استخلاص البيانات الذكية</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --primary-color: #4285F4; --secondary-color: #34A853; --button-color: #006A4E; }
+        body {
+            font-family: 'Cairo', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            color: #333;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 40px 50px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 700px;
+            text-align: center;
+            border-top: 5px solid var(--primary-color);
+        }
+        h1 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+        p {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .button {
+            background-color: var(--button-color);
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 10px 5px;
+        }
+        .button:hover:not(:disabled) {
+            background-color: #005a41;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+        .button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        #file-input { display: none; }
+        #file-info {
+            font-weight: 600;
+            color: var(--secondary-color);
+            margin-top: 20px;
+            min-height: 24px;
+            display: block;
+        }
+        .status {
+            margin-top: 25px;
+            font-size: 1.1em;
+            font-weight: 600;
+            min-height: 25px;
+            padding: 10px;
+            border-radius: 6px;
+            display: none;
+        }
+        .status.processing { background-color: #e9f5ff; color: #0056b3; }
+        .status.error { background-color: #f8d7da; color: #721c24; }
+        .status.success { background-color: #d4edda; color: #155724; }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--primary-color);
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <h1><i class="fas fa-robot"></i> أداة استخلاص البيانات الذكية</h1>
+        <p>اختر ملفًا ثم اضغط على "بدء المعالجة" ليقوم الذكاء الاصطناعي بتحليله.</p>
         
-        # قائمة بأنواع الملفات التي يدعمها Gemini API مباشرة
-        supported_mime_types = [
-            'application/pdf', 'image/png', 'image/jpeg', 'image/heic', 'image/heif', 'image/webp',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', # .xlsx
-            'application/vnd.ms-excel', # .xls
-            'application/msword', # .doc
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' # .docx
-        ]
+        <input type="file" id="file-input" accept=".xlsx, .pdf, .doc, .docx, .png, .jpg, .jpeg">
         
-        if mime_type not in supported_mime_types:
-             # إذا كان نوع الملف غير مدعوم مباشرة، نعرض رسالة خطأ واضحة
-             return jsonify(error=f"نوع الملف '{mime_type}' غير مدعوم حاليًا من قبل الذكاء الاصطناعي."), 400
-
-        model = genai.GenerativeModel('gemini-1.5-pro-latest')
+        <button class="button" id="select-file-btn"><i class="fas fa-file-upload"></i> اختر ملف</button>
+        <button class="button" id="process-file-btn" disabled><i class="fas fa-cogs"></i> بدء المعالجة</button>
         
-        print(f"[*] يتم إرسال الملف {file.filename} (النوع: {mime_type}) إلى الذكاء الاصطناعي للتحليل...")
-        response = model.generate_content([EXTRACTION_PROMPT, {"mime_type": mime_type, "data": file_bytes}])
+        <span id="file-info">لم يتم اختيار أي ملف</span>
         
-        cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
-
-        try:
-            json_data = json.loads(cleaned_text)
-        except json.JSONDecodeError:
-            print(f"[!] خطأ: فشل الذكاء الاصطناعي في توليد JSON صالح. الرد كان:\n{response.text}")
-            raise ValueError("لم يتمكن المساعد الذكي من استخلاص البيانات بصيغة صحيحة.")
-
-        output_filename = f"{uuid.uuid4()}.json"
-        output_path = os.path.join(TEMP_FOLDER, output_filename)
+        <div class="status" id="status"></div>
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, ensure_ascii=False, indent=4)
-        
-        print(f"[+] تم حفظ الملف المحول بنجاح: {output_filename}")
-        
-        return jsonify({
-            "message": "تم استخلاص البيانات بنجاح!",
-            "download_url": f"/download/{output_filename}"
-        })
+        <a href="#" class="button" id="download-link" style="display: none;" download="network_data.json">
+            <i class="fas fa-download"></i> تحميل الملف الناتج
+        </a>
+    </div>
+    <script>
+        const selectFileBtn = document.getElementById('select-file-btn');
+        const processFileBtn = document.getElementById('process-file-btn');
+        const fileInput = document.getElementById('file-input');
+        const statusDiv = document.getElementById('status');
+        const downloadLink = document.getElementById('download-link');
+        const fileInfoDiv = document.getElementById('file-info');
 
-    except Exception as e:
-        print(f"[!] حدث خطأ أثناء المعالجة: {e}")
-        return jsonify(error=str(e)), 500
+        let selectedFile = null;
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    """
-    يسمح للمستخدم بتحميل ملف JSON الناتج.
-    """
-    try:
-        safe_filename = secure_filename(filename)
-        return send_from_directory(
-            TEMP_FOLDER,
-            safe_filename,
-            as_attachment=True,
-            download_name="network_data.json"
-        )
-    except FileNotFoundError:
-        abort(404)
+        selectFileBtn.addEventListener('click', () => fileInput.click());
 
-if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                // ==========================================================
+                //  **هذا هو السطر الذي تم إصلاحه**
+                //  نختار الملف الأول من قائمة الملفات [0]
+                // ==========================================================
+                selectedFile = fileInput.files[0]; 
+
+                fileInfoDiv.textContent = `الملف المختار: ${selectedFile.name}`;
+                processFileBtn.disabled = false;
+                downloadLink.style.display = 'none';
+                statusDiv.style.display = 'none';
+            }
+        });
+
+        processFileBtn.addEventListener('click', async () => {
+            if (!selectedFile) {
+                alert('الرجاء اختيار ملف أولاً.');
+                return;
+            }
+
+            processFileBtn.disabled = true;
+            selectFileBtn.disabled = true;
+
+            statusDiv.className = 'status processing';
+            statusDiv.innerHTML = 'جاري تحليل الملف بالذكاء الاصطناعي... <div class="spinner"></div>';
+            statusDiv.style.display = 'block';
+            downloadLink.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            try {
+                const response = await fetch('/extract', { method: 'POST', body: formData });
+                const result = await response.json();
+
+                if (!response.ok) throw new Error(result.error || 'حدث خطأ غير متوقع');
+                
+                statusDiv.className = 'status success';
+                statusDiv.innerHTML = `<i class="fas fa-check-circle"></i> اكتمل الاستخلاص بنجاح!`;
+                downloadLink.href = result.download_url;
+                downloadLink.style.display = 'inline-block';
+
+            } catch (error) {
+                statusDiv.className = 'status error';
+                statusDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> فشل الاستخلاص: ${error.message}`;
+            } finally {
+                selectFileBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
