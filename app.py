@@ -10,17 +10,15 @@ from dotenv import load_dotenv
 # --- إعدادات التطبيق والذكاء الاصطناعي ---
 load_dotenv()
 
-# استخدام مجلد مؤقت آمن يوفره نظام التشغيل بدلاً من مجلدات محلية
+# استخدام مجلد مؤقت آمن يوفره نظام التشغيل
 from tempfile import gettempdir
-UPLOAD_FOLDER = gettempdir()
-CONVERTED_FOLDER = gettempdir()
+TEMP_FOLDER = gettempdir()
 
 ALLOWED_EXTENSIONS = {'xlsx', 'pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'}
 
 app = Flask(__name__, static_folder='static')
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['CONVERTED_FOLDER'] = CONVERTED_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
+# زيادة الحد الأقصى لحجم الملف المسموح به
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
 
 # إعداد مفتاح API الخاص بـ Gemini
 try:
@@ -72,14 +70,30 @@ def extract_data():
         return jsonify(error="لم يتم اختيار ملف"), 400
 
     try:
+        # ======================================================================
+        #  **هذا هو الإصلاح الجذري للمشكلة**
+        #  نستخدم الآن نوع الملف (MIME type) الذي يرسله المتصفح مباشرة
+        #  بدلاً من محاولة تخمينه، وهذا يضمن الدقة التامة.
+        # ======================================================================
         file_bytes = file.read()
-        mime_type, _ = mimetypes.guess_type(file.filename)
-        if not mime_type:
-            mime_type = 'application/octet-stream'
+        mime_type = file.mimetype # <- السطر الجديد والمُعدل
+        
+        # قائمة بأنواع الملفات التي يدعمها Gemini API مباشرة
+        supported_mime_types = [
+            'application/pdf', 'image/png', 'image/jpeg', 'image/heic', 'image/heif', 'image/webp',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', # .xlsx
+            'application/vnd.ms-excel', # .xls
+            'application/msword', # .doc
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' # .docx
+        ]
+        
+        if mime_type not in supported_mime_types:
+             # إذا كان نوع الملف غير مدعوم مباشرة، نعرض رسالة خطأ واضحة
+             return jsonify(error=f"نوع الملف '{mime_type}' غير مدعوم حاليًا من قبل الذكاء الاصطناعي."), 400
 
         model = genai.GenerativeModel('gemini-1.5-pro-latest')
         
-        print(f"[*] يتم إرسال الملف {file.filename} ({mime_type}) إلى الذكاء الاصطناعي للتحليل...")
+        print(f"[*] يتم إرسال الملف {file.filename} (النوع: {mime_type}) إلى الذكاء الاصطناعي للتحليل...")
         response = model.generate_content([EXTRACTION_PROMPT, {"mime_type": mime_type, "data": file_bytes}])
         
         cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
@@ -91,8 +105,7 @@ def extract_data():
             raise ValueError("لم يتمكن المساعد الذكي من استخلاص البيانات بصيغة صحيحة.")
 
         output_filename = f"{uuid.uuid4()}.json"
-        # استخدام مسار آمن في المجلد المؤقت
-        output_path = os.path.join(app.config['CONVERTED_FOLDER'], output_filename)
+        output_path = os.path.join(TEMP_FOLDER, output_filename)
         
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=4)
@@ -106,7 +119,6 @@ def extract_data():
 
     except Exception as e:
         print(f"[!] حدث خطأ أثناء المعالجة: {e}")
-        # إرجاع رسالة الخطأ الفعلية للمستخدم لتسهيل تصحيح الأخطاء
         return jsonify(error=str(e)), 500
 
 @app.route('/download/<filename>')
@@ -115,10 +127,9 @@ def download_file(filename):
     يسمح للمستخدم بتحميل ملف JSON الناتج.
     """
     try:
-        # تأمين اسم الملف قبل استخدامه
         safe_filename = secure_filename(filename)
         return send_from_directory(
-            app.config['CONVERTED_FOLDER'],
+            TEMP_FOLDER,
             safe_filename,
             as_attachment=True,
             download_name="network_data.json"
