@@ -7,6 +7,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import pandas as pd
 import math
+import threading # <-- لاستخدام المعالجة في الخلفية
 
 # --- إعدادات التطبيق ---
 load_dotenv()
@@ -14,7 +15,10 @@ from tempfile import gettempdir
 TEMP_FOLDER = gettempdir()
 
 app = Flask(__name__, static_folder='static')
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # زيادة الحد إلى 100MB
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+
+# قاموس لتخزين حالة الوظائف (في تطبيق حقيقي، ستستخدم قاعدة بيانات مثل Redis)
+JOBS = {}
 
 # إعداد مفتاح API الخاص بـ Gemini
 try:
@@ -27,18 +31,82 @@ except Exception as e:
 
 # --- التعليمات الدقيقة للذكاء الاصطناعي (Prompt) ---
 EXTRACTION_PROMPT = """
-أنت مساعد خبير في استخلاص البيانات. سأعطيك جزءًا من جدول بيانات بصيغة Markdown.
-مهمتك هي تحويل هذا الجزء فقط إلى مصفوفة JSON تحتوي على كائنات.
-كل كائن يجب أن يحتوي على الحقول التالية بالضبط:
-'id', 'governorate', 'area', 'type', 'specialty_main', 'specialty_sub', 'name', 'address', 'hotline', 'phones'.
+أنت مساعد خبير في استخلاص البيانات بشكل منظم ومهمتك هي تحليل المستندات أو النصوص المقدمة لك. 
+هذه البيانات تحتوي على قوائم لمقدمي خدمة طبية. 
+المطلوب منك هو المرور على المحتوى بالكامل واستخلاص المعلومات التالية لكل مقدم خدمة تجده:
 
-**قواعد الإخراج (مهم جدًا):**
-- يجب أن يكون إخراجك فقط مصفوفة JSON `[...]`.
-- لا تقم بتضمين أي نص أو شروحات قبل أو بعد المصفوفة.
+1.  **id**: يجب أن يكون معرفًا فريدًا. استخدم رقم تسلسلي مثل "CID000001", "CID000002", وهكذا.
+2.  **governorate**: المحافظة.
+3.  **area**: المنطقة أو الحي.
+4.  **type**: نوع مقدم الخدمة (مثال: مستشفى، صيدلية، معمل).
+5.  **specialty_main**: التخصص الرئيسي.
+6.  **specialty_sub**: التخصص الفرعي (إذا وجد، وإلا كرر التخصص الرئيسي).
+7.  **name**: اسم مقدم الخدمة.
+8.  **address**: العنوان بالتفصيل.
+9.  **hotline**: الخط الساخن (إذا وجد، يجب أن يكون كنص). إذا لم يوجد، استخدم `null`.
+10. **phones**: قائمة بكل أرقام الهواتف الأخرى كقائمة من النصوص (array of strings). إذا لم توجد، استخدم `[]`.
+
+**قواعد الإخراج النهائية (مهم جدًا):**
+- يجب أن يكون إخراجك النهائي عبارة عن مصفوفة JSON واحدة `[...]` تحتوي على كائنات JSON لكل مقدم خدمة.
+- لا تقم بتضمين أي نص أو شروحات أو ملاحظات قبل أو بعد مصفوفة JSON.
 - لا تستخدم علامات markdown مثل ```json.
-- تأكد من أن قيمة `hotline` هي نص (string) أو `null`.
-- تأكد من أن قيمة `phones` هي مصفوفة من النصوص (array of strings).
 """
+
+def process_file_in_background(job_id, file_path, original_filename):
+    """
+    هذه الدالة تعمل في الخلفية لمعالجة الملف دون إيقاف الخادم.
+    """
+    global JOBS
+    try:
+        model = genai.GenerativeModel('gemini-1.5-pro-latest')
+        df = pd.read_excel(file_path)
+        
+        BATCH_SIZE = 200
+        total_batches = math.ceil(len(df) / BATCH_SIZE)
+        all_results = []
+
+        for i in range(total_batches):
+            status_message = f"جاري معالجة الدفعة {i+1} من {total_batches}..."
+            JOBS[job_id]['status'] = 'processing'
+            JOBS[job_id]['progress'] = status_message
+            print(f"الوظيفة {job_id}: {status_message}")
+
+            start_index = i * BATCH_SIZE
+            end_index = start_index + BATCH_SIZE
+            batch_df = df[start_index:end_index]
+            
+            data_as_text = batch_df.to_markdown(index=False)
+            content_to_process = [EXTRACTION_PROMPT, data_as_text]
+
+            response = model.generate_content(content_to_process)
+            cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
+            
+            try:
+                batch_json = json.loads(cleaned_text)
+                if isinstance(batch_json, list):
+                    all_results.extend(batch_json)
+            except json.JSONDecodeError:
+                print(f"[!] خطأ في الدفعة {i+1} للوظيفة {job_id}: فشل الذكاء الاصطناعي في توليد JSON صالح.")
+                continue
+
+        if not all_results:
+            raise ValueError("فشلت عملية الاستخلاص بالكامل.")
+
+        output_filename = f"{job_id}.json"
+        output_path = os.path.join(TEMP_FOLDER, output_filename)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(all_results, f, ensure_ascii=False, indent=4)
+        
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['download_url'] = f"/download/{output_filename}"
+        print(f"[+] اكتملت الوظيفة {job_id} بنجاح.")
+
+    except Exception as e:
+        print(f"[!] فشلت الوظيفة {job_id}: {e}")
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+
 
 # --- نقاط النهاية (API Endpoints) ---
 
@@ -47,75 +115,37 @@ def index():
     return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/extract', methods=['POST'])
-def extract_data():
+def start_extraction_job():
     if 'file' not in request.files:
         return jsonify(error="لم يتم إرسال أي ملف"), 400
     
     file = request.files['file']
     if file.filename == '':
         return jsonify(error="لم يتم اختيار ملف"), 400
+    
+    # حفظ الملف مؤقتًا
+    filename = secure_filename(file.filename)
+    temp_path = os.path.join(TEMP_FOLDER, f"{uuid.uuid4()}_{filename}")
+    file.save(temp_path)
 
-    try:
-        model = genai.GenerativeModel('gemini-1.5-pro-latest')
-        
-        print(f"[*] تم استلام ملف: {file.filename}")
-        df = pd.read_excel(file)
-        print(f"[*] تم قراءة {len(df)} سجلاً من ملف Excel.")
-        
-        # ======================================================================
-        #  **نظام المعالجة بالدفعات (Batch Processing)**
-        # ======================================================================
-        BATCH_SIZE = 200 # عدد السجلات في كل دفعة
-        total_batches = math.ceil(len(df) / BATCH_SIZE)
-        all_results = []
+    # إنشاء وظيفة جديدة
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {'status': 'pending', 'progress': 'في انتظار بدء المعالجة...'}
 
-        for i in range(total_batches):
-            start_index = i * BATCH_SIZE
-            end_index = start_index + BATCH_SIZE
-            batch_df = df[start_index:end_index]
-            
-            print(f"[*] تتم معالجة الدفعة {i+1} من {total_batches} (السجلات من {start_index} إلى {end_index})...")
-            
-            data_as_text = batch_df.to_markdown(index=False)
-            content_to_process = [EXTRACTION_PROMPT, data_as_text]
+    # بدء المعالجة في الخلفية
+    thread = threading.Thread(target=process_file_in_background, args=(job_id, temp_path, filename))
+    thread.start()
 
-            response = model.generate_content(content_to_process)
-            cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
+    # الرد فورًا على المستخدم بهوية الوظيفة
+    return jsonify(job_id=job_id)
 
-            try:
-                batch_json = json.loads(cleaned_text)
-                if isinstance(batch_json, list):
-                    all_results.extend(batch_json)
-                else:
-                    print(f"[!] تحذير: الدفعة {i+1} لم ترجع قائمة، تم تجاهلها.")
 
-            except json.JSONDecodeError:
-                print(f"[!] خطأ في الدفعة {i+1}: فشل الذكاء الاصطناعي في توليد JSON صالح. الرد كان:\n{response.text}")
-                # يمكن اختيار الاستمرار أو إيقاف العملية هنا
-                continue # استمرار للدُفعة التالية
-
-        print(f"[*] اكتملت المعالجة. تم استخلاص {len(all_results)} سجلاً بنجاح.")
-        # ======================================================================
-
-        if not all_results:
-            raise ValueError("فشلت عملية الاستخلاص بالكامل. لم يتم العثور على بيانات صالحة.")
-
-        output_filename = f"{uuid.uuid4()}.json"
-        output_path = os.path.join(TEMP_FOLDER, output_filename)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(all_results, f, ensure_ascii=False, indent=4)
-        
-        print(f"[+] تم حفظ الملف المحول بنجاح: {output_filename}")
-        
-        return jsonify({
-            "message": f"تم استخلاص {len(all_results)} سجلاً بنجاح!",
-            "download_url": f"/download/{output_filename}"
-        })
-
-    except Exception as e:
-        print(f"[!] حدث خطأ أثناء المعالجة: {e}")
-        return jsonify(error=str(e)), 500
+@app.route('/status/<job_id>')
+def get_job_status(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        abort(404)
+    return jsonify(job)
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -131,4 +161,4 @@ def download_file(filename):
         abort(404)
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
