@@ -1,9 +1,0 @@
-Flask
-gunicorn
-pandas
-openpyxl
-google-generativeai
-python-dotenv
-tabulate
-google-cloud-storage
-google-cloud-pubsub
